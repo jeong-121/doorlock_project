@@ -1,15 +1,10 @@
 // -----------------------------------------------------------------------------
 // fsm_module.v
-// Digital doorlock main FSM with password logic and auto-lock support.
+// Digital doorlock FSM with password comparator, password change logic,
+// attempt counter, and 10-second auto-lock timer integration.
 //
-// 담당 구현 범위
-// 1. Password comparator       : CHECK state, input_buffer == saved_password
-// 2. Password change logic     : CHANGE state, saved_password <= input_buffer
-// 3. Attempt counter           : fail_count, 3 failures -> ALARM
-// 4. Auto-lock timer           : UNLOCK state, timer timeout -> IDLE
-//
-// Clock assumption: clk = 1 kHz from top_module.
-// Default password: 16'h1234 means BCD digits 1,2,3,4.
+// Clock assumption: clk = 1 kHz.
+// Default password: 1234, stored as 16'h1234 in 4-digit BCD format.
 // -----------------------------------------------------------------------------
 module fsm_module #(
     parameter integer AUTO_LOCK_TICKS = 10000
@@ -19,24 +14,15 @@ module fsm_module #(
 
     input  wire [3:0] digit_in,
     input  wire       key_valid,
-    input  wire       enter,       // keypad '#'
-    input  wire       change,      // keypad 'A' or admin/change button
-    input  wire       auto_open,   // inside-door immediate open button
-    input  wire       alarm_clear, // admin/reset clear for ALARM state
+    input  wire       enter,
+    input  wire       change,
+    input  wire       auto_open,
 
     output reg        unlock_on,
     output reg        alarm_on,
-    output reg        locked_on,
-    output reg        input_mode_on,
-    output reg        change_mode_on,
     output reg        key_led,
-    output reg        beep_on,
     output reg  [3:0] input_count_led,
-    output reg  [2:0] state,
-    output reg  [1:0] fail_count_out,
-    output reg  [2:0] digit_count_out,
-    output wire [31:0] timer_count_out,
-    output wire [31:0] timer_remain_ticks
+    output reg  [2:0] state
 );
 
     localparam IDLE   = 3'd0;
@@ -48,29 +34,28 @@ module fsm_module #(
 
     reg [15:0] input_buffer;
     reg [15:0] saved_password;
-    reg [2:0]  digit_count;   // 0~4. 4 means a complete 4-digit input exists.
-    reg [1:0]  fail_count;    // 0~2. 3rd failure enters ALARM immediately.
+    reg [2:0]  digit_count;   // 0~4. 4 means exactly four digits have been entered.
+    reg [1:0]  fail_count;    // 0,1,2. If fail_count==2 and one more fail occurs -> ALARM.
 
     reg key_prev;
     reg enter_prev;
     reg change_prev;
     reg auto_open_prev;
-    reg alarm_clear_prev;
 
     wire key_pulse;
     wire enter_pulse;
     wire change_pulse;
     wire auto_open_pulse;
-    wire alarm_clear_pulse;
-    wire auto_lock_timeout;
+
     wire auto_lock_enable;
+    wire auto_lock_timeout;
 
-    assign key_pulse         = key_valid & ~key_prev;
-    assign enter_pulse       = enter & ~enter_prev;
-    assign change_pulse      = change & ~change_prev;
-    assign auto_open_pulse   = auto_open & ~auto_open_prev;
-    assign alarm_clear_pulse = alarm_clear & ~alarm_clear_prev;
+    assign key_pulse       = key_valid & ~key_prev;
+    assign enter_pulse     = enter & ~enter_prev;
+    assign change_pulse    = change & ~change_prev;
+    assign auto_open_pulse = auto_open & ~auto_open_prev;
 
+    // Timer counts only while the door is unlocked.
     assign auto_lock_enable = (state == UNLOCK);
 
     auto_lock_timer #(
@@ -79,24 +64,20 @@ module fsm_module #(
         .clk(clk),
         .rst(rst),
         .enable(auto_lock_enable),
-        .timeout(auto_lock_timeout),
-        .count(timer_count_out),
-        .remain_ticks(timer_remain_ticks)
+        .timeout(auto_lock_timeout)
     );
 
     always @(posedge clk or posedge rst) begin
         if (rst) begin
-            key_prev         <= 1'b0;
-            enter_prev       <= 1'b0;
-            change_prev      <= 1'b0;
-            auto_open_prev   <= 1'b0;
-            alarm_clear_prev <= 1'b0;
+            key_prev       <= 1'b0;
+            enter_prev     <= 1'b0;
+            change_prev    <= 1'b0;
+            auto_open_prev <= 1'b0;
         end else begin
-            key_prev         <= key_valid;
-            enter_prev       <= enter;
-            change_prev      <= change;
-            auto_open_prev   <= auto_open;
-            alarm_clear_prev <= alarm_clear;
+            key_prev       <= key_valid;
+            enter_prev     <= enter;
+            change_prev    <= change;
+            auto_open_prev <= auto_open;
         end
     end
 
@@ -109,62 +90,46 @@ module fsm_module #(
             fail_count      <= 2'd0;
             unlock_on       <= 1'b0;
             alarm_on        <= 1'b0;
-            locked_on       <= 1'b1;
-            input_mode_on   <= 1'b0;
-            change_mode_on  <= 1'b0;
             key_led         <= 1'b0;
-            beep_on         <= 1'b0;
             input_count_led <= 4'b0000;
-            fail_count_out  <= 2'd0;
-            digit_count_out <= 3'd0;
         end else begin
             key_led <= 1'b0;
-            beep_on <= 1'b0;
 
             case (state)
                 IDLE: begin
                     unlock_on       <= 1'b0;
                     alarm_on        <= 1'b0;
-                    locked_on       <= 1'b1;
-                    input_mode_on   <= 1'b0;
-                    change_mode_on  <= 1'b0;
                     input_buffer    <= 16'd0;
                     digit_count     <= 3'd0;
                     input_count_led <= 4'b0000;
 
                     if (auto_open_pulse) begin
                         unlock_on <= 1'b1;
-                        locked_on <= 1'b0;
                         state     <= UNLOCK;
-                    end else if (key_pulse && (digit_in <= 4'd9)) begin
+                    end else if (key_pulse) begin
                         input_buffer    <= {12'd0, digit_in};
                         digit_count     <= 3'd1;
                         input_count_led <= 4'b0001;
                         key_led         <= 1'b1;
-                        beep_on         <= 1'b1;
-                        input_mode_on   <= 1'b1;
                         state           <= INPUT;
                     end
                 end
 
                 INPUT: begin
-                    locked_on     <= 1'b1;
-                    input_mode_on <= 1'b1;
-
                     if (auto_open_pulse) begin
                         unlock_on       <= 1'b1;
-                        locked_on       <= 1'b0;
                         input_buffer    <= 16'd0;
                         digit_count     <= 3'd0;
                         input_count_led <= 4'b0000;
                         state           <= UNLOCK;
-                    end else if (key_pulse && (digit_in <= 4'd9)) begin
+                    end else if (key_pulse) begin
                         key_led <= 1'b1;
-                        beep_on <= 1'b1;
 
+                        // Accept up to exactly 4 digits. Extra digits are ignored until ENTER.
                         if (digit_count < 3'd4) begin
                             input_buffer <= {input_buffer[11:0], digit_in};
                             digit_count  <= digit_count + 3'd1;
+
                             case (digit_count + 3'd1)
                                 3'd1: input_count_led <= 4'b0001;
                                 3'd2: input_count_led <= 4'b0011;
@@ -172,35 +137,26 @@ module fsm_module #(
                                 default: input_count_led <= 4'b1111;
                             endcase
                         end
-                    end else if (enter_pulse) begin
-                        if (digit_count == 3'd4) begin
-                            state <= CHECK;
-                        end else begin
-                            input_buffer    <= 16'd0;
-                            digit_count     <= 3'd0;
-                            input_count_led <= 4'b0000;
-                            state           <= IDLE;
-                        end
+                    end else if (enter_pulse && digit_count == 3'd4) begin
+                        state <= CHECK;
                     end
+                    // If ENTER is pressed before 4 digits, stay in INPUT and wait for more digits.
                 end
 
                 CHECK: begin
-                    input_mode_on <= 1'b0;
-
+                    // Password comparator.
                     if (input_buffer == saved_password) begin
                         unlock_on  <= 1'b1;
-                        locked_on  <= 1'b0;
                         alarm_on   <= 1'b0;
                         fail_count <= 2'd0;
                         state      <= UNLOCK;
                     end else begin
                         unlock_on <= 1'b0;
-                        locked_on <= 1'b1;
 
+                        // Attempt counter: 3rd failure enters ALARM.
                         if (fail_count == 2'd2) begin
-                            alarm_on   <= 1'b1;
-                            fail_count <= 2'd0;
-                            state      <= ALARM;
+                            alarm_on <= 1'b1;
+                            state    <= ALARM;
                         end else begin
                             fail_count      <= fail_count + 2'd1;
                             input_buffer    <= 16'd0;
@@ -212,15 +168,12 @@ module fsm_module #(
                 end
 
                 UNLOCK: begin
-                    unlock_on      <= 1'b1;
-                    locked_on      <= 1'b0;
-                    alarm_on       <= 1'b0;
-                    input_mode_on  <= 1'b0;
-                    change_mode_on <= 1'b0;
+                    unlock_on <= 1'b1;
+                    alarm_on  <= 1'b0;
 
+                    // Auto-lock has highest priority in UNLOCK state.
                     if (auto_lock_timeout) begin
                         unlock_on       <= 1'b0;
-                        locked_on       <= 1'b1;
                         input_buffer    <= 16'd0;
                         digit_count     <= 3'd0;
                         input_count_led <= 4'b0000;
@@ -229,11 +182,9 @@ module fsm_module #(
                         input_buffer    <= 16'd0;
                         digit_count     <= 3'd0;
                         input_count_led <= 4'b0000;
-                        change_mode_on  <= 1'b1;
                         state           <= CHANGE;
                     end else if (enter_pulse) begin
                         unlock_on       <= 1'b0;
-                        locked_on       <= 1'b1;
                         input_buffer    <= 16'd0;
                         digit_count     <= 3'd0;
                         input_count_led <= 4'b0000;
@@ -242,37 +193,23 @@ module fsm_module #(
                 end
 
                 ALARM: begin
-                    alarm_on       <= 1'b1;
-                    unlock_on      <= 1'b0;
-                    locked_on      <= 1'b1;
-                    input_mode_on  <= 1'b0;
-                    change_mode_on <= 1'b0;
-
-                    if (alarm_clear_pulse) begin
-                        alarm_on        <= 1'b0;
-                        fail_count      <= 2'd0;
-                        input_buffer    <= 16'd0;
-                        digit_count     <= 3'd0;
-                        input_count_led <= 4'b0000;
-                        state           <= IDLE;
-                    end else begin
-                        state <= ALARM;
-                    end
+                    alarm_on  <= 1'b1;
+                    unlock_on <= 1'b0;
+                    state     <= ALARM;
                 end
 
                 CHANGE: begin
-                    unlock_on      <= 1'b1;
-                    locked_on      <= 1'b0;
-                    alarm_on       <= 1'b0;
-                    change_mode_on <= 1'b1;
+                    unlock_on <= 1'b1;
+                    alarm_on  <= 1'b0;
 
-                    if (key_pulse && (digit_in <= 4'd9)) begin
+                    if (key_pulse) begin
                         key_led <= 1'b1;
-                        beep_on <= 1'b1;
 
+                        // Accept up to exactly 4 digits. Extra digits are ignored until ENTER.
                         if (digit_count < 3'd4) begin
                             input_buffer <= {input_buffer[11:0], digit_in};
                             digit_count  <= digit_count + 3'd1;
+
                             case (digit_count + 3'd1)
                                 3'd1: input_count_led <= 4'b0001;
                                 3'd2: input_count_led <= 4'b0011;
@@ -280,33 +217,27 @@ module fsm_module #(
                                 default: input_count_led <= 4'b1111;
                             endcase
                         end
-                    end else if (enter_pulse) begin
-                        if (digit_count == 3'd4) begin
-                            saved_password  <= input_buffer;
-                            input_buffer    <= 16'd0;
-                            digit_count     <= 3'd0;
-                            input_count_led <= 4'b0000;
-                            unlock_on       <= 1'b0;
-                            locked_on       <= 1'b1;
-                            change_mode_on  <= 1'b0;
-                            state           <= IDLE;
-                        end else begin
-                            input_buffer    <= 16'd0;
-                            digit_count     <= 3'd0;
-                            input_count_led <= 4'b0000;
-                            change_mode_on  <= 1'b0;
-                            state           <= UNLOCK;
-                        end
+                    end else if (enter_pulse && digit_count == 3'd4) begin
+                        // Password change logic: save only after exactly four digits.
+                        saved_password  <= input_buffer;
+                        input_buffer    <= 16'd0;
+                        digit_count     <= 3'd0;
+                        input_count_led <= 4'b0000;
+                        unlock_on       <= 1'b0;
+                        state           <= IDLE;
                     end
+                    // If ENTER is pressed before 4 digits, stay in CHANGE and wait for more digits.
                 end
 
                 default: begin
-                    state <= IDLE;
+                    state           <= IDLE;
+                    input_buffer    <= 16'd0;
+                    digit_count     <= 3'd0;
+                    input_count_led <= 4'b0000;
+                    unlock_on       <= 1'b0;
+                    alarm_on        <= 1'b0;
                 end
             endcase
-
-            fail_count_out  <= fail_count;
-            digit_count_out <= digit_count;
         end
     end
 
