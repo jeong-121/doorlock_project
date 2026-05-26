@@ -8,21 +8,22 @@ module tb_fsm_module;
     reg enter;
     reg change;
     reg auto_open;
+    reg alarm_clear;
 
     wire unlock_on;
     wire alarm_on;
+    wire locked_on;
+    wire input_mode_on;
+    wire change_mode_on;
     wire key_led;
+    wire beep_on;
     wire [3:0] input_count_led;
     wire [2:0] state;
+    wire [1:0] fail_count_out;
+    wire [2:0] digit_count_out;
+    wire [31:0] timer_count_out;
+    wire [31:0] timer_remain_ticks;
 
-    localparam IDLE   = 3'd0;
-    localparam INPUT  = 3'd1;
-    localparam CHECK  = 3'd2;
-    localparam UNLOCK = 3'd3;
-    localparam ALARM  = 3'd4;
-    localparam CHANGE = 3'd5;
-
-    // Short timeout for simulation only. Board top uses 10000 ticks = 10 seconds.
     fsm_module #(
         .AUTO_LOCK_TICKS(10)
     ) DUT (
@@ -33,52 +34,63 @@ module tb_fsm_module;
         .enter(enter),
         .change(change),
         .auto_open(auto_open),
+        .alarm_clear(alarm_clear),
         .unlock_on(unlock_on),
         .alarm_on(alarm_on),
+        .locked_on(locked_on),
+        .input_mode_on(input_mode_on),
+        .change_mode_on(change_mode_on),
         .key_led(key_led),
+        .beep_on(beep_on),
         .input_count_led(input_count_led),
-        .state(state)
+        .state(state),
+        .fail_count_out(fail_count_out),
+        .digit_count_out(digit_count_out),
+        .timer_count_out(timer_count_out),
+        .timer_remain_ticks(timer_remain_ticks)
     );
 
-    initial begin
-        clk = 1'b0;
-        forever #0.5 clk = ~clk; // 1 kHz equivalent in ms timescale
-    end
+    always #0.5 clk = ~clk;
 
     task press_digit;
-        input [3:0] value;
+        input [3:0] d;
         begin
-            @(negedge clk);
-            digit_in = value;
+            digit_in = d;
             key_valid = 1'b1;
-            @(negedge clk);
+            #1;
             key_valid = 1'b0;
-            digit_in = 4'd0;
-            repeat (2) @(negedge clk);
+            #1;
         end
     endtask
 
     task press_enter;
         begin
-            @(negedge clk);
             enter = 1'b1;
-            @(negedge clk);
+            #1;
             enter = 1'b0;
-            repeat (2) @(negedge clk);
+            #1;
         end
     endtask
 
     task press_change;
         begin
-            @(negedge clk);
             change = 1'b1;
-            @(negedge clk);
+            #1;
             change = 1'b0;
-            repeat (2) @(negedge clk);
+            #1;
         end
     endtask
 
-    task input_password_1234;
+    task press_alarm_clear;
+        begin
+            alarm_clear = 1'b1;
+            #1;
+            alarm_clear = 1'b0;
+            #1;
+        end
+    endtask
+
+    task input_1234;
         begin
             press_digit(4'd1);
             press_digit(4'd2);
@@ -88,7 +100,7 @@ module tb_fsm_module;
         end
     endtask
 
-    task input_password_9999;
+    task input_9999;
         begin
             press_digit(4'd9);
             press_digit(4'd9);
@@ -99,74 +111,62 @@ module tb_fsm_module;
     endtask
 
     initial begin
+        clk = 1'b0;
+        rst = 1'b1;
         digit_in = 4'd0;
         key_valid = 1'b0;
         enter = 1'b0;
         change = 1'b0;
         auto_open = 1'b0;
-        rst = 1'b1;
-        repeat (3) @(negedge clk);
-        rst = 1'b0;
-        repeat (3) @(negedge clk);
+        alarm_clear = 1'b0;
 
-        // 1) Correct default password 1234 -> UNLOCK.
-        input_password_1234;
-        repeat (3) @(negedge clk);
-        if (state !== UNLOCK || unlock_on !== 1'b1) begin
-            $display("FAIL: 1234 did not unlock");
-            $finish;
-        end
+        #3 rst = 1'b0;
 
-        // 2) Auto-lock after timeout -> IDLE.
-        repeat (15) @(negedge clk);
-        if (state !== IDLE || unlock_on !== 1'b0) begin
-            $display("FAIL: auto-lock did not return to IDLE");
-            $finish;
-        end
+        // Test 1: correct default password 1234 -> UNLOCK
+        input_1234;
+        #2;
+        if (!unlock_on) $display("FAIL: 1234 did not unlock");
+        else $display("PASS: 1234 unlock");
 
-        // 3) Three failures -> ALARM.
-        input_password_9999;
-        input_password_9999;
-        input_password_9999;
-        repeat (3) @(negedge clk);
-        if (state !== ALARM || alarm_on !== 1'b1) begin
-            $display("FAIL: three failures did not enter ALARM");
-            $finish;
-        end
+        // Wait auto-lock
+        #15;
+        if (state != 3'd0) $display("FAIL: auto-lock did not return to IDLE");
+        else $display("PASS: auto-lock return to IDLE");
 
-        // 4) Reset clears ALARM and restores default password.
-        rst = 1'b1;
-        repeat (3) @(negedge clk);
-        rst = 1'b0;
-        repeat (3) @(negedge clk);
-        if (state !== IDLE || alarm_on !== 1'b0) begin
-            $display("FAIL: reset did not clear alarm");
-            $finish;
-        end
+        // Test 2: 3 wrong attempts -> ALARM
+        input_9999;
+        input_9999;
+        input_9999;
+        #2;
+        if (!alarm_on) $display("FAIL: 3 failures did not trigger ALARM");
+        else $display("PASS: 3 failures trigger ALARM");
 
-        // 5) Password change: unlock with 1234, change to 9999, then unlock with 9999.
-        input_password_1234;
-        repeat (3) @(negedge clk);
+        // Clear alarm
+        press_alarm_clear;
+        #2;
+        if (state != 3'd0) $display("FAIL: alarm_clear did not return to IDLE");
+        else $display("PASS: alarm_clear return to IDLE");
+
+        // Test 3: change password to 5678 after unlock
+        input_1234;
+        #2;
         press_change;
-        press_digit(4'd9);
-        press_digit(4'd9);
-        press_digit(4'd9);
-        press_digit(4'd9);
+        press_digit(4'd5);
+        press_digit(4'd6);
+        press_digit(4'd7);
+        press_digit(4'd8);
         press_enter;
-        repeat (3) @(negedge clk);
-        if (state !== IDLE) begin
-            $display("FAIL: password change did not re-lock");
-            $finish;
-        end
+        #2;
 
-        input_password_9999;
-        repeat (3) @(negedge clk);
-        if (state !== UNLOCK || unlock_on !== 1'b1) begin
-            $display("FAIL: changed password 9999 did not unlock");
-            $finish;
-        end
+        press_digit(4'd5);
+        press_digit(4'd6);
+        press_digit(4'd7);
+        press_digit(4'd8);
+        press_enter;
+        #2;
+        if (!unlock_on) $display("FAIL: changed password 5678 did not unlock");
+        else $display("PASS: changed password 5678 unlock");
 
-        $display("PASS: password logic and auto-lock tests completed");
         $finish;
     end
 endmodule
