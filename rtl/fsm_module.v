@@ -1,13 +1,19 @@
 // -----------------------------------------------------------------------------
 // fsm_module.v
 // Digital doorlock FSM with password comparator, password change logic,
-// attempt counter, and 10-second auto-lock timer integration.
+// attempt counter, 10-second auto-lock timer, and 10-second input inactivity timer.
 //
 // Clock assumption: clk = 1 kHz.
 // Default password: 1234, stored as 16'h1234 in 4-digit BCD format.
+//
+// Added behavior:
+// - UNLOCK state: 10 seconds elapsed -> IDLE
+// - INPUT state : no key/enter activity for 10 seconds -> cancel input and return IDLE
+// - CHANGE state: no key/enter activity for 10 seconds -> cancel change and return IDLE
 // -----------------------------------------------------------------------------
 module fsm_module #(
-    parameter integer AUTO_LOCK_TICKS = 10000
+    parameter integer AUTO_LOCK_TICKS    = 10000,
+    parameter integer INPUT_TIMEOUT_TICKS = 10000
 )(
     input  wire       clk,
     input  wire       rst,
@@ -50,12 +56,16 @@ module fsm_module #(
     wire auto_lock_enable;
     wire auto_lock_timeout;
 
+    wire input_timer_enable;
+    wire input_timer_clear;
+    wire input_timeout;
+
     assign key_pulse       = key_valid & ~key_prev;
     assign enter_pulse     = enter & ~enter_prev;
     assign change_pulse    = change & ~change_prev;
     assign auto_open_pulse = auto_open & ~auto_open_prev;
 
-    // Timer counts only while the door is unlocked.
+    // Door-open timer: counts only while the door is unlocked.
     assign auto_lock_enable = (state == UNLOCK);
 
     auto_lock_timer #(
@@ -65,6 +75,22 @@ module fsm_module #(
         .rst(rst),
         .enable(auto_lock_enable),
         .timeout(auto_lock_timeout)
+    );
+
+    // Input inactivity timer:
+    // INPUT  : user is entering the current password.
+    // CHANGE : user is entering a new password.
+    // Any key/enter/auto_open activity restarts the inactivity timer.
+    assign input_timer_enable = (state == INPUT) || (state == CHANGE);
+    assign input_timer_clear  = rst || key_pulse || enter_pulse || auto_open_pulse;
+
+    auto_lock_timer #(
+        .TIMEOUT_TICKS(INPUT_TIMEOUT_TICKS)
+    ) INPUT_TIMEOUT_TIMER (
+        .clk(clk),
+        .rst(input_timer_clear),
+        .enable(input_timer_enable),
+        .timeout(input_timeout)
     );
 
     always @(posedge clk or posedge rst) begin
@@ -116,7 +142,14 @@ module fsm_module #(
                 end
 
                 INPUT: begin
-                    if (auto_open_pulse) begin
+                    if (input_timeout) begin
+                        // 10 seconds with no input activity: cancel password entry.
+                        input_buffer    <= 16'd0;
+                        digit_count     <= 3'd0;
+                        input_count_led <= 4'b0000;
+                        unlock_on       <= 1'b0;
+                        state           <= IDLE;
+                    end else if (auto_open_pulse) begin
                         unlock_on       <= 1'b1;
                         input_buffer    <= 16'd0;
                         digit_count     <= 3'd0;
@@ -202,7 +235,14 @@ module fsm_module #(
                     unlock_on <= 1'b1;
                     alarm_on  <= 1'b0;
 
-                    if (key_pulse) begin
+                    if (input_timeout) begin
+                        // 10 seconds with no input activity: cancel password change.
+                        input_buffer    <= 16'd0;
+                        digit_count     <= 3'd0;
+                        input_count_led <= 4'b0000;
+                        unlock_on       <= 1'b0;
+                        state           <= IDLE;
+                    end else if (key_pulse) begin
                         key_led <= 1'b1;
 
                         // Accept up to exactly 4 digits. Extra digits are ignored until ENTER.
