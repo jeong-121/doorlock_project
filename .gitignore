@@ -1,0 +1,27 @@
+# Simulation outputs
+*.vcd
+*.fst
+*.lxt
+*.out
+*.vvp
+work/
+transcript
+vsim.wlf
+
+# Quartus generated files
+output_files/
+db/
+incremental_db/
+*.qws
+*.bak
+*.rpt
+*.sof
+*.pof
+*.jdi
+*.pin
+*.summary
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
