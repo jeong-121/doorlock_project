@@ -1,63 +1,55 @@
-// -----------------------------------------------------------------------------
-// top_module.v
-// HBE-Combo II-SE physical input mapping + fsm_module integration.
-//
-// TACT_SW[0]~[9]  : digit 0~9
-// TACT_SW[10]     : ENTER
-// TACT_SW[11]     : CHANGE
-// TACT_SW[12]     : AUTO_OPEN
-// RESET_N         : board reset, active-low
-// -----------------------------------------------------------------------------
 module top_module(
-    input  wire       clk_1khz,
-    input  wire       RESET_N,
+    input  wire        clk_1khz,
+    input  wire        RESET_N,
     input  wire [12:0] TACT_SW,
-    output wire [7:0] LEDR
+
+    output wire [15:0] LEDR,
+
+    output wire [7:0]  FND_SEG,
+    output wire [3:0]  FND_COM,
+
+    output wire        CLCD_RS,
+    output wire        CLCD_RW,
+    output wire        CLCD_E,
+    output wire [7:0]  CLCD_DATA,
+
+    output wire        piezo
 );
 
     wire rst;
-    wire enter;
-    wire change;
-    wire auto_open;
-
-    wire key_valid;
-    wire [3:0] digit_in;
-
-    wire unlock_on;
-    wire alarm_on;
-    wire key_led;
-    wire [3:0] input_count_led;
-    wire [2:0] state;
-
-    // HBE-Combo II-SE reset pin is RESET_N, so convert it to active-high rst.
     assign rst = ~RESET_N;
 
-    assign enter     = TACT_SW[10];
-    assign change    = TACT_SW[11];
-    assign auto_open = TACT_SW[12];
+    wire        key_valid;
+    wire [3:0]  digit_in;
+    wire        enter;
+    wire        change;
+    wire        auto_open;
 
-    assign key_valid = TACT_SW[0] | TACT_SW[1] | TACT_SW[2] | TACT_SW[3] |
-                       TACT_SW[4] | TACT_SW[5] | TACT_SW[6] | TACT_SW[7] |
-                       TACT_SW[8] | TACT_SW[9];
+    input_manager #(
+        .CLK_FREQ_HZ(1000),
+        .DEBOUNCE_MS(20)
+    ) U_INPUT (
+        .clk(clk_1khz),
+        .reset_n(RESET_N),
+        .tact_sw(TACT_SW),
+        .digit_in(digit_in),
+        .key_valid(key_valid),
+        .enter(enter),
+        .change(change),
+        .auto_open(auto_open)
+    );
 
-    assign digit_in =
-        TACT_SW[0] ? 4'd0 :
-        TACT_SW[1] ? 4'd1 :
-        TACT_SW[2] ? 4'd2 :
-        TACT_SW[3] ? 4'd3 :
-        TACT_SW[4] ? 4'd4 :
-        TACT_SW[5] ? 4'd5 :
-        TACT_SW[6] ? 4'd6 :
-        TACT_SW[7] ? 4'd7 :
-        TACT_SW[8] ? 4'd8 :
-        TACT_SW[9] ? 4'd9 :
-                     4'd0;
+    wire        unlock_on;
+    wire        alarm_on;
+    wire        key_led;
+    wire [3:0]  input_count_led;
+    wire [2:0]  state;
 
     fsm_module #(
         .AUTO_LOCK_TICKS(10000),
         .INPUT_TIMEOUT_TICKS(10000),
-        .ALARM_TIMEOUT_TICKS(10000)  // clk_1khz 기준 10초
-    ) FSM (
+        .ALARM_TICKS(10000)
+    ) U_FSM (
         .clk(clk_1khz),
         .rst(rst),
         .digit_in(digit_in),
@@ -72,13 +64,64 @@ module top_module(
         .state(state)
     );
 
-    assign LEDR[0] = input_count_led[0];
-    assign LEDR[1] = input_count_led[1];
-    assign LEDR[2] = input_count_led[2];
-    assign LEDR[3] = input_count_led[3];
-    assign LEDR[4] = key_led;
-    assign LEDR[5] = unlock_on;
-    assign LEDR[6] = alarm_on;
-    assign LEDR[7] = auto_open;
+    wire [2:0] input_cnt;
+    assign input_cnt = {2'b00, input_count_led[0]}
+                     + {2'b00, input_count_led[1]}
+                     + {2'b00, input_count_led[2]}
+                     + {2'b00, input_count_led[3]};
+
+    fnd_team_adapter U_FND (
+        .clk(clk_1khz),
+        .rst(rst),
+        .state(state),
+        .input_count_led(input_count_led),
+        .fnd_seg(FND_SEG),
+        .fnd_com(FND_COM)
+    );
+
+    lcd_controller #(
+        .CLK_HZ(1000)
+    ) U_LCD (
+        .clk(clk_1khz),
+        .rst_n(RESET_N),
+        .state(state),
+        .input_cnt(input_cnt),
+        .lcd_rs(CLCD_RS),
+        .lcd_rw(CLCD_RW),
+        .lcd_e(CLCD_E),
+        .lcd_data(CLCD_DATA)
+    );
+
+    reg [9:0] blink_cnt;
+    reg       blink;
+    always @(posedge clk_1khz or posedge rst) begin
+        if (rst) begin
+            blink_cnt <= 10'd0;
+            blink     <= 1'b0;
+        end else if (blink_cnt >= 10'd166) begin
+            blink_cnt <= 10'd0;
+            blink     <= ~blink;
+        end else begin
+            blink_cnt <= blink_cnt + 10'd1;
+        end
+    end
+
+    led_controller U_LED (
+        .clk(clk_1khz),
+        .rst_n(RESET_N),
+        .state(state),
+        .input_cnt(input_cnt),
+        .blink(blink),
+        .led(LEDR)
+    );
+
+    piezo_alarm U_PIEZO (
+        .clk(clk_1khz),
+        .rst(rst),
+        .alarm_on(alarm_on),
+        .key_beep(key_led),
+        .unlock_on(unlock_on),
+        .piezo(piezo)
+    );
 
 endmodule

@@ -1,11 +1,7 @@
 // -----------------------------------------------------------------------------
 // auto_lock_timer.v
-// Auto-lock timer for the FPGA doorlock project.
-// clk is assumed to be 1 kHz. 10 seconds = 10,000 ticks.
-//
-// enable=1  : timer counts
-// enable=0  : timer clears
-// timeout=1 : asserted after TIMEOUT_TICKS cycles while enable remains high
+// Generic active-high reset timer. With clk_1khz, TIMEOUT_TICKS=10000 means 10s.
+// timeout stays high after expiration until enable=0 or rst=1.
 // -----------------------------------------------------------------------------
 module auto_lock_timer #(
     parameter integer TIMEOUT_TICKS = 10000
