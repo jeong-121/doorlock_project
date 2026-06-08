@@ -54,7 +54,9 @@ module top_module(
                      4'd0;
 
     fsm_module #(
-        .AUTO_LOCK_TICKS(10000)  // clk_1khz 기준 10초
+        .AUTO_LOCK_TICKS(10000),
+        .INPUT_TIMEOUT_TICKS(10000),
+        .ALARM_TIMEOUT_TICKS(10000)  // clk_1khz 기준 10초
     ) FSM (
         .clk(clk_1khz),
         .rst(rst),
